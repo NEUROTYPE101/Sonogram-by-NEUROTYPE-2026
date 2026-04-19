@@ -1,0 +1,141 @@
+desc: Sonogram (by NEUROTYPE)
+// MIT License
+
+slider1:0<0,1,1{Play,Freeze}>Freeze Mode
+slider2:0.4<0.1,1,0.05>Falloff Speed 
+
+@init
+ext_noinit = 1; 
+fft_size = 8192;
+fft_buf = 0;
+win_buf = fft_size * 2;
+ring_L = fft_size * 4;
+ring_R = ring_L + fft_size;
+ring_size = 16384;
+ring_pos = 0;
+
+falloff_buf = 30000; 
+
+i = 0; loop(fft_size,
+  win_buf[i] = 0.35875 - 0.48829*cos(2*$pi*i/fft_size) + 0.14128*cos(4*$pi*i/fft_size) - 0.01168*cos(6*$pi*i/fft_size);
+  i += 1;
+);
+
+function heat_map(dB) (
+  
+  v = (dB + 75.0) / 75.0; 
+  v < 0 ? v = 0 : v > 1 ? v = 1;
+
+  v < 0.15 ? ( 
+    gfx_r=0; gfx_g=v*0.2; gfx_b=0.3+v*4; 
+  ) :
+  v < 0.4 ? ( 
+    gfx_r=0; gfx_g=(v-0.15)*3; gfx_b=1; 
+  ) :
+  v < 0.7 ? ( 
+    gfx_r=(v-0.4)*3; gfx_g=1; gfx_b=1-(v-0.4)*3; // Сочный зеленый -> Желтый
+  ) : ( 
+    gfx_r=1; gfx_g=1-(v-0.7)*3; gfx_b=0; // Желтый -> Оранжевый -> Красный
+  );
+);
+
+@slider
+freeze = slider1;
+f_speed = slider2;
+
+@sample
+freeze == 0 ? (
+  ring_L[ring_pos] = spl0; ring_R[ring_pos] = spl1;
+  ring_pos = (ring_pos + 1) % ring_size;
+);
+
+@gfx 800 500
+graph_w = gfx_w - 60; graph_h = gfx_h;
+
+(gfx_w != last_w || gfx_h != last_h) ? (
+  gfx_setimgdim(1, graph_w, graph_h);
+  gfx_setimgdim(2, graph_w, graph_h);
+  gfx_dest = 1; gfx_set(0,0,0,1); gfx_rect(0,0,graph_w,graph_h);
+  last_w = gfx_w; last_h = gfx_h;
+);
+
+freeze == 0 ? (
+
+  i = 0; r_pos = (ring_pos - fft_size + ring_size) % ring_size;
+  loop(fft_size,
+    fft_buf[i*2] = (ring_L[r_pos] + ring_R[r_pos]) * 0.5 * win_buf[i];
+    fft_buf[i*2+1] = 0;
+    r_pos = (r_pos + 1) % ring_size; i += 1;
+  );
+  fft(fft_buf, fft_size); fft_permute(fft_buf, fft_size);
+
+  gfx_dest = 2; gfx_blit(1, 1, 0, 0, 1, graph_w, graph_h, 0, 0, graph_w, graph_h);
+  gfx_dest = 1; gfx_set(0); gfx_rect(0,0,graph_w,graph_h);
+  gfx_x = 0; gfx_y = -1; gfx_blit(2, 1, 0);
+
+  x = 0; min_f = 20; max_f = 20000;
+  log_min = log(min_f); log_max = log(max_f);
+  
+  loop(graph_w,
+    f = exp(log_min + (x / graph_w) * (log_max - log_min));
+    bin = f * fft_size / srate;
+    b0 = floor(bin); frac = bin - b0;
+    
+    m0 = sqrt(fft_buf[b0*2]^2 + fft_buf[b0*2+1]^2);
+    m1 = sqrt(fft_buf[(b0+1)*2]^2 + fft_buf[(b0+1)*2+1]^2);
+    mag = m0 + (m1 - m0) * frac;
+    
+    current_dB = 20 * log10(mag / (fft_size * 0.5) + 0.000001);
+    
+    
+    old_dB = falloff_buf[x];
+    dB = current_dB > old_dB ? current_dB : old_dB - f_speed;
+    falloff_buf[x] = dB;
+
+    dB > -75 ? (
+      heat_map(dB);
+      gfx_set(gfx_r, gfx_g, gfx_b, 1);
+      gfx_line(x, graph_h-2, x, graph_h);
+    );
+    x += 1;
+  );
+);
+
+gfx_dest = -1;
+gfx_set(0); gfx_rect(0,0,gfx_w,gfx_h);
+gfx_blit(1, 1, 0, 0, 0, graph_w, graph_h, 0, 0, graph_w, graph_h);
+
+gfx_set(1, 1, 1, 0.1);
+f_marks = 0; f_marks[0]=20; f_marks[1]=100; f_marks[2]=500; f_marks[3]=1000; f_marks[4]=5000; f_marks[5]=10000; f_marks[6]=20000;
+i = 0; loop(7,
+  px = (log(f_marks[i]/20)/log(20000/20)) * graph_w;
+  gfx_line(px, 0, px, graph_h);
+  gfx_set(1, 1, 1, 0.4); gfx_x = px + 2; gfx_y = 5;
+  f_marks[i] >= 1000 ? gfx_printf("%dk", f_marks[i]/1000) : gfx_printf("%d", f_marks[i]);
+  gfx_set(1, 1, 1, 0.1); i += 1;
+);
+
+mouse_x >= 0 && mouse_x < graph_w && mouse_y >= 0 && mouse_y < graph_h ? (
+  m_freq = exp(log_min + (mouse_x / graph_w) * (log_max - log_min));
+  m_val = 12 * (log(m_freq / 440.0) / log(2.0)) + 69;
+  m_n = floor(m_val + 0.5);
+  m_note_idx = m_n % 12;
+  
+  m_note_idx == 0 ? m_name = "C" : m_note_idx == 1 ? m_name = "C#" :
+  m_note_idx == 2 ? m_name = "D" : m_note_idx == 3 ? m_name = "D#" :
+  m_note_idx == 4 ? m_name = "E" : m_note_idx == 5 ? m_name = "F" :
+  m_note_idx == 6 ? m_name = "F#" : m_note_idx == 7 ? m_name = "G" :
+  m_note_idx == 8 ? m_name = "G#" : m_note_idx == 9 ? m_name = "A" :
+  m_note_idx == 10 ? m_name = "A#" : m_name = "B";
+
+  gfx_set(0, 0, 0, 0.85);
+  gfx_rect(mouse_x + 15, mouse_y - 45, 115, 42);
+  gfx_set(1, 0.5, 0, 1); 
+  gfx_rect(mouse_x + 15, mouse_y - 45, 115, 42, 0);
+  
+  gfx_set(1, 1, 1, 1);
+  gfx_x = mouse_x + 22; gfx_y = mouse_y - 38;
+  gfx_printf("%.1f Hz", m_freq);
+  gfx_x = mouse_x + 22; gfx_y = mouse_y - 22;
+  gfx_printf("%s%d", m_name, floor(m_n/12)-1);
+);
